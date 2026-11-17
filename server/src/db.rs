@@ -150,6 +150,14 @@ impl Db {
               created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS messages_bot ON messages(bot_id, id);
+            CREATE TABLE IF NOT EXISTS adapter_profiles (
+              id TEXT PRIMARY KEY,
+              spec TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS routines (
               id TEXT PRIMARY KEY,
               bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -208,6 +216,52 @@ impl Db {
         if let Some(v) = p.session_id { set("session_id", &v) }
         if let Some(v) = p.hidden { set("hidden", &v) }
         if let Some(v) = p.unread { set("unread", &v) }
+    }
+
+    pub fn setting(&self, key: &str) -> Option<String> {
+        self.c().query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional().ok().flatten()
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        self.c().execute("INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value])?;
+        Ok(())
+    }
+
+    pub fn set_primary(&self, bot_id: &str) -> rusqlite::Result<()> {
+        let mut conn = self.c();
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM bots WHERE id = ?1)", [bot_id],
+            |r| r.get(0))?;
+        if !exists { return Err(rusqlite::Error::QueryReturnedNoRows); }
+        tx.execute("UPDATE bots SET primary_bot = CASE WHEN id = ?1 THEN 1 ELSE 0 END", [bot_id])?;
+        tx.commit()
+    }
+
+    pub fn bots_using(&self, harness: &str) -> usize {
+        self.c().query_row("SELECT COUNT(*) FROM bots WHERE harness = ?1", [harness], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) as usize
+    }
+
+    pub fn adapter_specs(&self) -> Vec<crate::adapters::Spec> {
+        let c = self.c();
+        let mut q = c.prepare("SELECT spec FROM adapter_profiles ORDER BY id").unwrap();
+        q.query_map([], |r| r.get::<_, String>(0)).unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|data| serde_json::from_str(&data).ok())
+            .collect()
+    }
+
+    pub fn save_adapter(&self, spec: &crate::adapters::Spec) -> rusqlite::Result<()> {
+        let data = serde_json::to_string(spec).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        self.c().execute("INSERT INTO adapter_profiles(id, spec) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET spec=excluded.spec",
+            params![spec.id, data])?;
+        Ok(())
+    }
+
+    pub fn delete_adapter(&self, id: &str) -> rusqlite::Result<()> {
+        self.c().execute("DELETE FROM adapter_profiles WHERE id = ?", [id])?;
+        Ok(())
     }
 
     pub fn delete_bot(&self, id: &str) {
