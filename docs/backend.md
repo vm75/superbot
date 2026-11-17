@@ -45,9 +45,9 @@ fallbacks. Changing the default never silently changes existing bots.
 The primary bot's harness can be selected independently from the UI.
 
 **Argument placeholders** are replaced within individual process arguments,
-without a shell: \`{{prompt}}\`, \`{{full_prompt}}\`, \`{{system}}\`,
-\`{{model}}\`, \`{{effort}}\`, \`{{session_id}}\`, \`{{state_dir}}\`,
-and \`{{cwd}}\`. A multiline argument is still a single argument, not
+without a shell: `{{prompt}}`, `{{full_prompt}}`, `{{system}}`,
+`{{model}}`, `{{effort}}`, `{{session_id}}`, `{{state_dir}}`,
+and `{{cwd}}`. A multiline argument is still a single argument, not
 multiple words. If stdin mode is enabled, the full prompt is also sent
 to stdin. Model/effort arguments are only appended when selected, and are
 placed before the base (positional) prompt arguments.
@@ -59,7 +59,7 @@ placed before the base (positional) prompt arguments.
   value paths can address nested objects and array indexes. Supported
   event kinds: session, delta, text, tool, error.
 
-\`\`\`json
+```json
 [
   {"kind":"session","when_path":"type","equals":"session","value_path":"sessionId"},
   {"kind":"delta","when_path":"type","equals":"delta","value_path":"text"},
@@ -67,11 +67,11 @@ placed before the base (positional) prompt arguments.
   {"kind":"tool","when_path":"type","equals":"tool","name_path":"name","detail_path":"command"},
   {"kind":"error","when_path":"type","equals":"error","value_path":"message"}
 ]
-\`\`\`
+```
 
 **Session strategies:** none, generated, or event. Stateless agents receive
 the bot's rules, memory, and bounded recent conversation history each run.
-For generated sessions, include the \`{{session_id}}\` placeholder in start
+For generated sessions, include the `{{session_id}}` placeholder in start
 and resume arguments if the CLI supports an explicit ID. For event sessions,
 provide a JSONL session event rule and resume arguments. Harness sessions
 cannot be resumed across different agents.
@@ -81,7 +81,7 @@ configure a noninteractive model-discovery command. The command output may
 be JSON (array or object with a models array, IDs or model objects) or one
 model ID per line. Manual models are used if dynamic discovery yields none.
 For example, an Agy starter profile can use program agy with --print and
-\`{{full_prompt}}\` as two separate arguments. Verify that your installed
+`{{full_prompt}}` as two separate arguments. Verify that your installed
 Agy version actually supports the chosen flags and authentication; the
 starter is a template rather than a guaranteed compatibility adapter.
 
