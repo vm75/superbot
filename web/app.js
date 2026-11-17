@@ -234,49 +234,70 @@ function render(keepScroll) {
   if (details.open && document.activeElement?.id !== "d-name") renderDetails();
 }
 
-// Model and effort picker above the input. Saved on the Bot, so each Bot keeps its own.
-const modelLists = {}; // harness -> Promise<[{id, label, efforts}]>
+// Model and effort selector. Never reuse one harness's catalog for another.
+const modelLists = {}; // harness -> Promise<models>
 let modelBarKey = "";
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 async function renderModelBar() {
   const first = bot(activeId);
-  if (!first) return;
-  modelLists[first.harness] ??= api("GET", `/api/harnesses/${first.harness}/models`).catch(() => []);
-  const list = await modelLists[first.harness];
-  const b = bot(activeId); // re-read: the Bot may have changed while loading
-  if (!b || b.id !== first.id || b.harness !== first.harness) return;
-  const key = [b.id, b.harness, b.model, b.effort, list.length].join("|");
+  if (!first) { $("model-bar").hidden = true; return; }
+  const harness = first.harness;
+  modelLists[harness] ??= api("GET", "/api/harnesses/" + encodeURIComponent(harness) + "/models")
+    .catch((err) => { delete modelLists[harness]; throw err; });
+  let list;
+  try {
+    list = await modelLists[harness];
+  } catch (err) {
+    const b = bot(activeId);
+    if (!b || b.id !== first.id || b.harness !== harness) return;
+    $("model-select").innerHTML = '<option value="">Model discovery failed</option>';
+    $("model-select").disabled = true;
+    $("model-select").title = err.message + " (check the CLI and authentication on the server)";
+    $("effort-select").hidden = true;
+    $("model-bar").hidden = false;
+    modelBarKey = "";
+    return;
+  }
+  const b = bot(activeId);
+  if (!b || b.id !== first.id || b.harness !== harness) return;
+  const key = [b.id, b.harness, b.model, b.effort, JSON.stringify(list)].join("|");
   if (key === modelBarKey) return;
   modelBarKey = key;
-
-  const all = [...new Set(list.flatMap((m) => m.efforts))];
+  const all = [...new Set(list.flatMap((m) => m.efforts || []))];
   const models = [{ id: "", label: "Default model", efforts: all }, ...list];
-  // A Bot saved with an alias (e.g. "opus") shows as its exact model.
-  const isCurrent = (m) => m.id === (b.model || "") || (b.model && m.aliases?.includes(b.model));
-  if (b.model && !list.some(isCurrent)) models.push({ id: b.model, label: b.model, efforts: all });
-  const current = models.find(isCurrent);
-  $("model-select").innerHTML = models.map((m) =>
-    `<option value="${esc(m.id)}" ${m === current ? "selected" : ""}>${esc(m.label)}</option>`).join("");
-  $("effort-select").innerHTML = ["", ...current.efforts].map((e) =>
-    `<option value="${esc(e)}" ${e === (b.effort || "") ? "selected" : ""}>${e ? cap(e) : "Default effort"}</option>`).join("");
-  $("effort-select").hidden = !current.efforts.length;
+  const isCurrent = (m) => m.id === (b.model || "") || (b.model && (m.aliases || []).includes(b.model));
+  const unknown = !!b.model && !list.some(isCurrent);
+  const current = models.find(isCurrent) || models[0];
+  const select = $("model-select");
+  select.innerHTML = (unknown
+    ? '<option value="!unavailable" disabled selected>Saved model unavailable — choose a model</option>'
+    : '') + models.map((m) => '<option value="' + esc(m.id) + '"' +
+      (!unknown && m === current ? ' selected' : '') + '>' + esc(m.label) + '</option>').join("");
+  select.disabled = false;
+  select.title = unknown ? "The saved model (" + b.model + ") is not in the " + harness + " catalog. Choose a model to replace it." : "Model";
+  const efforts = current.efforts || [];
+  $("effort-select").innerHTML = ["", ...efforts].map((e) => '<option value="' + esc(e) + '"' +
+    (e === (b.effort || "") ? ' selected' : '') + '>' + (e ? cap(e) : "Default effort") + '</option>').join("");
+  $("effort-select").hidden = !efforts.length;
   $("model-bar").hidden = false;
 }
 
 async function saveModel(patch) {
   const b = bot(activeId);
   if (!b) return;
-  try { upsertBot(await api("PATCH", `/api/bots/${b.id}`, patch)); } catch (err) { alert(err.message); }
+  try { upsertBot(await api("PATCH", "/api/bots/" + encodeURIComponent(b.id), patch)); }
+  catch (err) { alert(err.message); }
+  modelBarKey = "";
   renderModelBar();
 }
 
 $("model-select").addEventListener("change", async (e) => {
   const b = bot(activeId);
-  const list = await modelLists[b.harness];
+  if (!b || e.target.value === "!unavailable") return;
+  const list = await modelLists[b.harness].catch(() => []);
   const m = list.find((x) => x.id === e.target.value);
-  // Keep the effort only if the new model supports it.
-  const effort = m && b.effort && !m.efforts.includes(b.effort) ? null : b.effort;
+  const effort = (!m || (b.effort && !(m.efforts || []).includes(b.effort))) ? null : b.effort;
   saveModel({ model: e.target.value || null, effort });
 });
 $("effort-select").addEventListener("change", (e) => saveModel({ effort: e.target.value || null }));
