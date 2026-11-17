@@ -385,3 +385,39 @@ impl Db {
         self.c().execute("DELETE FROM routines WHERE id = ?", [id]).unwrap();
     }
 }
+
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn adapters_defaults_and_legacy_codex_models_survive_restart() {
+        let path = std::env::temp_dir().join(format!("superbot-{}-{}.sqlite",
+            std::process::id(), crate::short_id()));
+        {
+            let db = Db::open(&path).unwrap();
+            db.create_bot("Admin", "#ffffff", "waddle", "codex", Some("claude-sonnet-5-5"), true);
+            db.set_setting("default_harness", "custom-cli").unwrap();
+            let spec: crate::adapters::Spec = serde_json::from_value(serde_json::json!({
+                "id": "custom-cli", "name": "Custom CLI", "program": "/bin/cat",
+                "stdin": true, "output": "text", "session": "none",
+                "model_list": [{"id":"example", "label":"Example"}]
+            })).unwrap();
+            assert!(spec.validate().is_ok());
+            db.save_adapter(&spec).unwrap();
+        }
+        {
+            let db = Db::open(&path).unwrap();
+            assert_eq!(db.setting("default_harness").as_deref(), Some("custom-cli"));
+            assert_eq!(db.adapter_specs().len(), 1);
+            assert_eq!(db.adapter_specs()[0].id, "custom-cli");
+            assert_eq!(db.bots()[0].model, None); // migration clears obsolete Claude selections
+            let another = db.create_bot("Other", "#ffffff", "waddle", "pi", None, false);
+            db.set_primary(&another.id).unwrap();
+            assert!(db.bot(&another.id).unwrap().primary);
+            assert_eq!(db.bots().iter().filter(|b| b.primary).count(), 1);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
