@@ -85,6 +85,7 @@ async function api(method, path, body) {
 // State
 let me = { name: "" };
 let harnesses = [];
+let installedHarnesses = [];
 let defaultHarness = "claude";
 let bots = [];
 const messages = {}; // botId -> array, loaded on first open
@@ -380,6 +381,7 @@ async function load(refresh) {
   const state = await api("GET", "/api/state");
   me = state.me;
   harnesses = state.harnesses;
+  installedHarnesses = state.installedHarnesses || state.harnesses;
   defaultHarness = state.defaultHarness;
   bots = state.bots;
   if (refresh) for (const id of Object.keys(messages)) messages[id] = await api("GET", `/api/bots/${id}/messages`);
@@ -432,9 +434,9 @@ function renderNewBot() {
     `<button type="button" class="nb-shape" data-shape="${s}" title="${s}">${avatar(nb.color, s, 60, s === nb.shape)}</button>`).join("");
   $("nb-colors").innerHTML = COLORS.map((c) =>
     `<button type="button" class="nb-color ${c === nb.color ? "on" : ""}" data-color="${c}" style="background:${c}" title="${c}"></button>`).join("");
-  const list = harnesses.length ? harnesses : Object.keys(HARNESS_NAMES);
+  const list = [...new Set([...(harnesses.length ? harnesses : Object.keys(HARNESS_NAMES)), nb.harness])];
   $("nb-harness").innerHTML = list.map((h) =>
-    `<option value="${h}" ${h === nb.harness ? "selected" : ""}>${HARNESS_NAMES[h] || h}</option>`).join("");
+    `<option value="${h}" ${h === nb.harness ? "selected" : ""}>${HARNESS_NAMES[h] || h}${installedHarnesses.includes(h) ? "" : " (not installed)"}</option>`).join("");
   $("nb-create").disabled = !$("nb-name").value.trim();
 }
 
@@ -521,12 +523,12 @@ function renderDetails() {
       <div class="d-text"><div>Bot's computer</div><div class="d-sub">${b.working ? esc(b.status || "Working") : "Asleep"}</div></div>
       <div class="d-screen ${b.working ? "awake" : ""}">${avatar(b.color, b.shape, 40)}${b.working ? "" : "<i>z</i>"}</div>
     </div></div>`;
-  const list = harnesses.length ? harnesses : Object.keys(HARNESS_NAMES);
+  const list = [...new Set([...(harnesses.length ? harnesses : Object.keys(HARNESS_NAMES)), b.harness])];
   const settings = `
     <div class="d-section"><span>Bot</span></div>
     <div class="d-card">
       <label class="d-item"><span class="d-text">Runs on</span>
-        <select id="d-harness">${list.map((h) => `<option value="${h}" ${h === b.harness ? "selected" : ""}>${HARNESS_NAMES[h] || h}</option>`).join("")}</select></label>
+        <select id="d-harness">${list.map((h) => `<option value="${h}" ${h === b.harness ? "selected" : ""}>${HARNESS_NAMES[h] || h}${installedHarnesses.includes(h) ? "" : " (not installed)"}</option>`).join("")}</select></label>
       <div class="d-item"><span class="d-text">Hide from sidebar</span>${toggle(b.hidden, 'id="d-hide"')}</div>
     </div>
     ${b.primary ? "" : `<div class="d-card"><button class="d-item d-link d-danger" id="d-delete">${ICONS.trash}<span>Delete Bot</span></button></div>`}`;
