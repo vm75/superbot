@@ -172,6 +172,11 @@ impl Db {
         // Added after the first release; fails harmlessly if it already exists.
         let _ = c.execute("ALTER TABLE messages ADD COLUMN from_bot TEXT", []);
         let _ = c.execute("ALTER TABLE bots ADD COLUMN effort TEXT", []);
+        // Repair older cross-harness settings: the old UI retained Claude model IDs
+        // when the primary bot was switched to Codex.
+        let _ = c.execute(
+            "UPDATE bots SET model = NULL, effort = NULL WHERE harness = 'codex' AND (model LIKE 'claude-%' OR model IN ('opus','sonnet','haiku','fable'))", []
+        );
         Ok(Db(Mutex::new(c)))
     }
 
