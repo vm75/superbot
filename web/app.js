@@ -244,6 +244,7 @@ async function renderModelBar() {
   const first = bot(activeId);
   if (!first) { $("model-bar").hidden = true; return; }
   const harness = first.harness;
+  if (!modelBarKey.startsWith(first.id + "|" + harness + "|")) $("model-bar").hidden = true;
   modelLists[harness] ??= api("GET", "/api/harnesses/" + encodeURIComponent(harness) + "/models")
     .catch((err) => { delete modelLists[harness]; throw err; });
   let list;
