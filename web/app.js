@@ -679,8 +679,8 @@ $("setting-primary-harness").addEventListener("change", async (e) => {
   } catch (err) { showSettingsError(err.message); renderSettings(); }
 });
 
-function openAdapterEditor(spec = {}) {
-  editingAdapterId = spec.id || null;
+function openAdapterEditor(spec = {}, existing = false) {
+  editingAdapterId = existing ? spec.id : null;
   $("adapter-editor").hidden = false;
   $("adapter-editor-title").textContent = editingAdapterId ? "Edit " + spec.name : "Create adapter";
   $("adapter-id").disabled = !!editingAdapterId;
@@ -756,7 +756,7 @@ $("adapter-list").addEventListener("click", async (e) => {
   const id = b.dataset.adapterId;
   const item = adapterItems.find((a) => a.id === id);
   if (!item) return;
-  if (action === "edit") return openAdapterEditor(item.spec);
+  if (action === "edit") return openAdapterEditor(item.spec, true);
   if (action === "clone") return openAdapterEditor({
     ...item.spec, id: item.id + "-copy", name: item.name + " copy"
   });
