@@ -8,7 +8,7 @@ mod runner;
 mod screen;
 
 use axum::extract::{Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -61,10 +61,6 @@ async fn main() {
         eprintln!("Refusing to listen on a public address without AUTH_PASSWORD.");
         std::process::exit(1);
     }
-    if adapters::get(&default_harness).is_none() {
-        eprintln!("DEFAULT_HARNESS must be one of: {}", adapters::NAMES.join(", "));
-        std::process::exit(1);
-    }
     PASSWORD.set(password).unwrap();
     WEB_DIR.set(std::env::var("WEB_DIR").ok().map(PathBuf::from)).unwrap();
 
@@ -74,6 +70,12 @@ async fn main() {
     std::fs::create_dir_all(&data_dir).expect("create DATA_DIR");
     std::fs::create_dir_all(&workspace).expect("create WORKSPACE_DIR");
     let db = Db::open(&data_dir.join("app.sqlite")).expect("open database");
+    adapters::load_custom(db.adapter_specs());
+    let effective_default = db.setting("default_harness").unwrap_or_else(|| default_harness.clone());
+    if adapters::get(&effective_default).is_none() {
+        eprintln!("Unknown default adapter: {effective_default}. Fix DEFAULT_HARNESS or the saved setting.");
+        std::process::exit(1);
+    }
 
     let screens = screen::Screens::from_env(data_dir.join("screens"));
     let app = App::new(db, Config {
@@ -91,7 +93,7 @@ async fn main() {
     // First start: create the primary Bot.
     if app.db.bots().is_empty() {
         let name = env("PRIMARY_BOT_NAME", "Assistant");
-        let bot = app.db.create_bot(&name, "#f5f5f5", "waddle", &app.cfg.default_harness, None, true);
+        let bot = app.db.create_bot(&name, "#f5f5f5", "waddle", &app.default_harness(), None, true);
         app.init_bot_files(&bot);
     }
 
@@ -99,6 +101,10 @@ async fn main() {
         .route("/state", get(state))
         .route("/events", get(events))
         .route("/harnesses/{name}/models", get(list_models))
+        .route("/adapters", get(list_adapters).post(create_adapter))
+        .route("/adapters/{id}", patch(update_adapter).delete(delete_adapter))
+        .route("/adapters/{id}/check", post(check_adapter))
+        .route("/settings", patch(update_settings))
         .route("/bots", get(list_bots).post(create_bot))
         .route("/bots/{id}", patch(update_bot).delete(delete_bot))
         .route("/bots/{id}/messages", get(list_messages).post(send_message))
@@ -130,7 +136,7 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await.expect("bind");
     println!("Listening on http://{host}:{port}");
-    println!("Harnesses on PATH: {}. Default: {}.", adapters::installed().join(", "), app.cfg.default_harness);
+    println!("Harnesses on PATH: {}. Default: {}.", adapters::installed().join(", "), app.default_harness());
     println!("Screens: {}.", if app.screens.is_some() { "on" } else { "off (install Xvfb and openbox to turn them on)" });
 
     // On SIGTERM/SIGINT: stop agents (queued work runs after restart), then exit.
@@ -253,7 +259,7 @@ async fn state(State(app): State<AppState>) -> Json<Value> {
     Json(json!({
         "me": { "name": env("USER_NAME", "You") },
         "harnesses": adapters::installed(),
-        "defaultHarness": app.cfg.default_harness,
+        "defaultHarness": app.default_harness(),
         "bots": bots,
     }))
 }
@@ -263,8 +269,111 @@ async fn list_models(Path(name): Path<String>) -> Res {
     if adapters::get(&name).is_none() {
         return Err(not_found("Harness"));
     }
-    let list = tokio::task::spawn_blocking(move || adapters::models(&name)).await.unwrap_or_default();
+    let list = tokio::task::spawn_blocking(move || adapters::models(&name))
+        .await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
     Ok(Json(json!(list)))
+}
+
+// Adapter configuration is an administrator capability: agent bearer tokens cannot edit it.
+// If AUTH_PASSWORD is unset, the server must be bound to loopback (checked on startup).
+fn admin_only(headers: &HeaderMap) -> Res<()> {
+    let h = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if h.starts_with("Bearer ") {
+        return Err(ApiError(StatusCode::FORBIDDEN, "Agent tokens cannot change adapters or settings.".into()));
+    }
+    let password = PASSWORD.get().unwrap();
+    if password.is_empty() { return Ok(()); }
+    let authenticated = h.strip_prefix("Basic ").and_then(base64_decode).is_some_and(|creds| {
+        let pass = creds.splitn(2, |b| *b == b':').nth(1).unwrap_or_default();
+        same(pass, password.as_bytes())
+    });
+    if authenticated { Ok(()) } else { Err(ApiError(StatusCode::FORBIDDEN, "Administrator login required.".into())) }
+}
+
+async fn list_adapters(State(_app): State<AppState>) -> Json<Value> {
+    let mut items: Vec<Value> = adapters::NAMES.iter().map(|id| json!({
+        "id": id, "name": match *id { "claude" => "Claude Code", "codex" => "Codex", _ => "Pi" },
+        "program": id, "kind": "builtin", "enabled": true, "available": adapters::on_path(id),
+    })).collect();
+    items.extend(adapters::custom_specs().into_iter().map(|s| {
+        let available = adapters::on_path(&s.program);
+        json!({ "id": s.id, "name": s.name, "program": s.program,
+            "kind": "custom", "enabled": s.enabled, "available": available, "spec": s })
+    }));
+    Json(json!(items))
+}
+
+fn parse_spec(v: Value) -> Res<adapters::Spec> {
+    let spec: adapters::Spec = serde_json::from_value(v).map_err(|e| bad(format!("Invalid adapter definition: {e}")))?;
+    spec.validate().map_err(bad)?;
+    Ok(spec)
+}
+
+async fn create_adapter(State(app): State<AppState>, headers: HeaderMap, Json(v): Json<Value>) -> Res<(StatusCode, Json<Value>)> {
+    admin_only(&headers)?;
+    let spec = parse_spec(v)?;
+    if adapters::custom_specs().iter().any(|s| s.id == spec.id) {
+        return Err(ApiError(StatusCode::CONFLICT, "Adapter ID already exists; edit it instead.".into()));
+    }
+    app.db.save_adapter(&spec).map_err(|e| bad(e.to_string()))?;
+    adapters::put_custom(spec.clone());
+    Ok((StatusCode::CREATED, Json(json!(spec))))
+}
+
+async fn update_adapter(State(app): State<AppState>, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> Res {
+    admin_only(&headers)?;
+    if !adapters::custom_specs().iter().any(|s| s.id == id) { return Err(not_found("Custom adapter")); }
+    let spec = parse_spec(v)?;
+    if spec.id != id { return Err(bad("Adapter ID cannot be changed; create a new adapter.")); }
+    if app.db.bots().iter().any(|b| b.harness == id && app.is_running(&b.id)) {
+        return Err(ApiError(StatusCode::CONFLICT, "Stop all bots running this adapter before editing it.".into()));
+    }
+    if !spec.enabled && (app.db.bots_using(&id) != 0 || app.default_harness() == id) {
+        return Err(bad("Reassign bots and change the default before disabling this adapter."));
+    }
+    app.db.save_adapter(&spec).map_err(|e| bad(e.to_string()))?;
+    adapters::put_custom(spec.clone());
+    Ok(Json(json!(spec)))
+}
+
+async fn delete_adapter(State(app): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Res {
+    admin_only(&headers)?;
+    if !adapters::custom_specs().iter().any(|s| s.id == id) { return Err(not_found("Custom adapter")); }
+    if app.db.bots_using(&id) != 0 || app.default_harness() == id {
+        return Err(bad("Reassign bots and change the default before deleting this adapter."));
+    }
+    app.db.delete_adapter(&id).map_err(|e| bad(e.to_string()))?;
+    adapters::delete_custom(&id);
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn check_adapter(State(_app): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Res {
+    admin_only(&headers)?;
+    let spec = adapters::custom_specs().into_iter().find(|s| s.id == id);
+    let program = if let Some(s) = spec { s.program } else if adapters::NAMES.contains(&id.as_str()) {
+        id.clone()
+    } else { return Err(not_found("Adapter")); };
+    let available = adapters::on_path(&program);
+    Ok(Json(json!({ "available": available, "executable": program,
+        "message": if available { "Executable found. Run a Bot to verify the CLI and authentication." }
+                   else { "Executable is not on the botd service PATH or is not executable." } })))
+}
+
+async fn update_settings(State(app): State<AppState>, headers: HeaderMap, Json(v): Json<Value>) -> Res {
+    admin_only(&headers)?;
+    if let Some(h) = v.get("defaultHarness") {
+        let name = h.as_str().ok_or_else(|| bad("defaultHarness must be a string"))?;
+        if adapters::get(name).is_none() { return Err(bad("Unknown or disabled default adapter.")); }
+        app.db.set_setting("default_harness", name).map_err(|e| bad(e.to_string()))?;
+    }
+    if let Some(id) = v.get("primaryBotId") {
+        let id = id.as_str().ok_or_else(|| bad("primaryBotId must be a string"))?;
+        if app.db.bot(id).is_none() { return Err(not_found("Bot")); }
+        app.db.set_primary(id).map_err(|e| bad(e.to_string()))?;
+        for b in app.db.bots() { app.push_bot(&b.id); }
+    }
+    Ok(Json(json!({"defaultHarness": app.default_harness()})))
 }
 
 async fn list_bots(State(app): State<AppState>) -> Json<Value> {
@@ -306,7 +415,7 @@ fn bot_patch(v: &Value) -> Res<BotPatch> {
     }
     if let Some(h) = v.get("harness") {
         let h = h.as_str().filter(|h| adapters::get(h).is_some());
-        let h = h.ok_or_else(|| bad(format!("Harness must be one of: {}", adapters::NAMES.join(", "))))?;
+        let h = h.ok_or_else(|| bad(format!("Harness must be one of: {}", adapters::names().join(", "))))?;
         p.harness = Some(h.into());
     }
     Ok(p)
@@ -315,7 +424,7 @@ fn bot_patch(v: &Value) -> Res<BotPatch> {
 async fn create_bot(State(app): State<AppState>, Json(v): Json<Value>) -> Res<(StatusCode, Json<Value>)> {
     let p = bot_patch(&v)?;
     let name = p.name.ok_or_else(|| bad("Name is required"))?;
-    let harness = p.harness.unwrap_or_else(|| app.cfg.default_harness.clone());
+    let harness = p.harness.unwrap_or_else(|| app.default_harness());
     let bot = app.db.create_bot(
         &name,
         p.color.as_deref().unwrap_or(pick(&COLORS)),
@@ -333,7 +442,11 @@ async fn update_bot(State(app): State<AppState>, Path(id): Path<String>, Json(v)
     let bot = need_bot(&app, &id)?;
     let mut p = bot_patch(&v)?;
     if p.harness.as_ref().is_some_and(|h| *h != bot.harness) {
-        p.session_id = Some(None); // sessions don't carry across harnesses
+        if app.is_running(&id) { return Err(ApiError(StatusCode::CONFLICT, "Stop this Bot before changing its adapter.".into())); }
+        // Never pass a model or effort setting from one CLI to another.
+        p.session_id = Some(None);
+        p.model = Some(None);
+        p.effort = Some(None);
     }
     app.db.update_bot(&id, p);
     app.push_bot(&id);
