@@ -258,7 +258,8 @@ async fn state(State(app): State<AppState>) -> Json<Value> {
     let bots: Vec<Value> = app.db.bots().iter().map(|b| app.bot_view(b)).collect();
     Json(json!({
         "me": { "name": env("USER_NAME", "You") },
-        "harnesses": adapters::installed(),
+        "harnesses": adapters::names(),
+        "installedHarnesses": adapters::installed(),
         "defaultHarness": app.default_harness(),
         "bots": bots,
     }))
