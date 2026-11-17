@@ -3,6 +3,7 @@ use super::{new_uuid, AgentEvent, Adapter, ModelOption, RunInput};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::{Command, Stdio};
+use std::path::Path;
 
 fn enabled_default() -> bool { true }
 
@@ -65,7 +66,8 @@ impl Spec {
         if self.name.trim().is_empty() || self.name.len() > 80 {
             return Err("Adapter name must be 1–80 characters.".into());
         }
-        if self.program.trim().is_empty() || self.program.len() > 512 || self.program.contains('\0') {
+        if self.program.trim().is_empty() || self.program.len() > 512 || self.program.contains('\0')
+            || (self.program.contains('/') && !Path::new(&self.program).is_absolute()) {
             return Err("Executable must be a program name or absolute path.".into());
         }
         if !["", "text", "jsonl"].contains(&self.output.as_str()) {
@@ -73,6 +75,14 @@ impl Spec {
         }
         if !["", "none", "generated", "event"].contains(&self.session.as_str()) {
             return Err("Session must be none, generated, or event.".into());
+        }
+        if self.session == "generated"
+            && (!self.start_args.iter().any(|a| a.contains("{{session_id}}"))
+                || !self.resume_args.iter().any(|a| a.contains("{{session_id}}"))) {
+            return Err("Generated sessions need {{session_id}} in both start and resume arguments.".into());
+        }
+        if self.session == "event" && !self.event_rules.iter().any(|r| r.kind == "session") {
+            return Err("Event-based sessions need a session event mapping.".into());
         }
         if self.session == "event" && self.output != "jsonl" {
             return Err("Event-based sessions require JSONL output.".into());
