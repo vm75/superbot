@@ -34,7 +34,7 @@ You message Bots like teammates. They finish work end to end and only ask you wh
 - **Memory that grows**: Bots save your rules and preferences as plain files. Ask "What do you remember about me?"
 - **Routines**: run a Bot on a schedule. Bots create their own cron jobs.
 - **Bot to Bot**: Bots ask each other for help and pass work along.
-- **Any agent**: Claude Code, Codex, or Pi, through one small adapter each.
+- **Any CLI agent**: Claude Code, Codex and Pi built in; create custom CLI adapters in the web UI (including an Agy starter).
 - **Approvals** *(soon)*: Bots pause and ask before risky actions.
 
 Also planned: computer use (Bots drive the browser and GUI apps), skills, and Slack.
@@ -99,7 +99,7 @@ Details: [VM specs](docs/background/grok-bot-computer-specs.md) and [running man
 
 - [Grok Bot reference](docs/grok-bot-reference.md): what we are rebuilding.
 - [Architecture](docs/architecture.md): the plan and open decisions.
-- [Backend](docs/backend.md): how the server works, and how to run and deploy it.
+- [Backend](docs/backend.md): how the server works, configurable CLI adapters, and how to run and deploy it.
 
 ## Status
 
