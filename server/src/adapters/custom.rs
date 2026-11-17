@@ -186,16 +186,17 @@ impl Adapter for Custom {
         let session = input.session_id.clone().unwrap_or_else(|| {
             if self.spec.session == "generated" { new_uuid() } else { String::new() }
         });
+        // Put options before the positional prompt; many CLIs stop option parsing there.
         let mut args = Vec::new();
-        self.append(&mut args, &self.spec.args, input, &session);
         if input.model.is_some() { self.append(&mut args, &self.spec.model_args, input, &session); }
         if input.effort.is_some() { self.append(&mut args, &self.spec.effort_args, input, &session); }
         if input.session_id.is_some() {
             self.append(&mut args, &self.spec.resume_args, input, &session);
         } else {
             self.append(&mut args, &self.spec.start_args, input, &session);
-            if self.spec.session == "generated" { out.push(AgentEvent::Session(session)); }
+            if self.spec.session == "generated" { out.push(AgentEvent::Session(session.clone())); }
         }
+        self.append(&mut args, &self.spec.args, input, &session);
         args
     }
 
