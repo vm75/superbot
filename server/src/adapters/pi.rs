@@ -7,7 +7,7 @@ use serde_json::Value;
 pub struct Pi;
 
 impl Adapter for Pi {
-    fn bin(&self) -> &'static str {
+    fn bin(&self) -> &str {
         "pi"
     }
 
