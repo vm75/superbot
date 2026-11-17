@@ -304,10 +304,11 @@ mod tests {
     fn template_and_history() {
         let mut a = Custom::new(spec());
         let args = a.args(&input(), &mut vec![]);
-        assert_eq!(args[0], "--print");
-        assert!(args[1].contains("user: first"));
-        assert!(args[1].ends_with("next"));
-        assert_eq!(&args[2..], &["--model", "m"]);
+        assert_eq!(args[0], "--model");
+        assert_eq!(args[1], "m");
+        assert_eq!(args[2], "--print");
+        assert!(args[3].contains("user: first"));
+        assert!(args[3].ends_with("next"));
     }
     #[test]
     fn text_output_one_message() {
