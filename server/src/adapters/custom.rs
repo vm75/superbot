@@ -120,10 +120,11 @@ impl Spec {
 pub struct Custom {
     pub spec: Spec,
     buffer: String,
+    truncated: bool,
 }
 
 impl Custom {
-    pub fn new(spec: Spec) -> Self { Self { spec, buffer: String::new() } }
+    pub fn new(spec: Spec) -> Self { Self { spec, buffer: String::new(), truncated: false } }
 
     fn conversation(&self, input: &RunInput) -> String {
         let mut s = format!("{}\n\n", input.system);
@@ -216,7 +217,13 @@ impl Adapter for Custom {
 
     fn on_line(&mut self, line: &[u8], out: &mut Vec<AgentEvent>) {
         if self.spec.output.is_empty() || self.spec.output == "text" {
+            if self.truncated { return; }
             let s = String::from_utf8_lossy(line);
+            if self.buffer.len().saturating_add(s.len()) >= 1_048_576 {
+                self.truncated = true;
+                out.push(AgentEvent::Error("CLI output exceeds the 1 MiB reply limit.".into()));
+                return;
+            }
             if !self.buffer.is_empty() {
                 self.buffer.push('\n');
                 out.push(AgentEvent::TextDelta("\n".into()));
@@ -242,7 +249,10 @@ impl Adapter for Custom {
         if self.spec.model_command.is_empty() { return self.spec.model_list.clone(); }
         let parts = &self.spec.model_command;
         let executable = if parts[0] == "{{program}}" { &self.spec.program } else { &parts[0] };
-        let result = Command::new(executable).args(&parts[1..]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+        // Kill a stuck model-discovery command rather than blocking a server worker forever.
+        let result = Command::new("timeout").args(["--kill-after=2s", "12s"])
+            .arg(executable).args(&parts[1..])
+            .stdin(Stdio::null()).stderr(Stdio::null()).output();
         let Ok(result) = result else { return self.spec.model_list.clone(); };
         if !result.status.success() { return self.spec.model_list.clone(); }
         let text = String::from_utf8_lossy(&result.stdout);
@@ -320,6 +330,33 @@ mod tests {
         Custom::new(s).on_line(br#"{"type":"message","message":{"content":[{"text":"hi"}]}}"#, &mut out);
         assert!(matches!(&out[..], [AgentEvent::Text(s)] if s == "hi"));
     }
+    #[tokio::test]
+    async fn launch_plain_text_adapter_end_to_end() {
+        let mut s = spec();
+        s.program = "/bin/cat".into();
+        s.stdin = true;
+        s.args.clear();
+        let (_tx, rx) = tokio::sync::watch::channel(None);
+        let mut result = Vec::new();
+        super::super::run(Box::new(Custom::new(s)), input(), rx, |e| {
+            if let AgentEvent::Text(text) = e { result.push(text); }
+        }).await;
+        assert_eq!(result.len(), 1);
+        assert!(result[0].contains("rules"));
+        assert!(result[0].contains("user: first"));
+        assert!(result[0].contains("next"));
+    }
+
+    #[test]
+    fn reject_missing_session_templates() {
+        let mut s = spec();
+        s.session = "generated".into();
+        assert!(s.validate().is_err());
+        s.start_args = vec!["--session".into(), "{{session_id}}".into()];
+        s.resume_args = vec!["--resume".into(), "{{session_id}}".into()];
+        assert!(s.validate().is_ok());
+    }
+
     #[test]
     fn validation() {
         assert!(spec().validate().is_ok());
