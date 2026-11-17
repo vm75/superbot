@@ -588,3 +588,192 @@ $("scroll-down").addEventListener("click", () => $("messages").scrollTo({ top: $
 window.addEventListener("focus", () => { markRead(); renderSidebar(); });
 
 load().then(connect).catch((err) => { $("messages").innerHTML = `<div class="timestamp">Can't reach the server: ${esc(err.message)}</div>`; });
+
+
+// Administrator settings. Custom harness definitions are stored in SQLite, not source files.
+let adapterItems = [];
+let editingAdapterId = null;
+const adapterFields = ["args", "model-args", "effort-args", "start-args", "resume-args", "model-command"];
+const lines = (s) => s.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
+const showSettingsError = (text) => {
+  $("settings-error").textContent = text || "";
+  $("settings-error").hidden = !text;
+};
+const choices = (value, items) => {
+  const all = [...items];
+  if (value && !all.some((i) => i.id === value)) all.push({ id: value, name: value + " (unavailable)" });
+  return all.map((i) => '<option value="' + esc(i.id) + '"' +
+    (i.id === value ? ' selected' : '') + '>' + esc(i.name) + '</option>').join("");
+};
+
+function renderSettings() {
+  const enabled = adapterItems.filter((a) => a.enabled && a.available);
+  const p = primary();
+  $("setting-default").innerHTML = choices(defaultHarness, enabled);
+  $("setting-primary").innerHTML = choices(p?.id,
+    bots.map((b) => ({ id: b.id, name: b.name })));
+  $("setting-primary-harness").innerHTML = choices(p?.harness, enabled);
+  $("adapter-list").innerHTML = adapterItems.map((a) => {
+    const state = a.enabled ? (a.available ? "Installed" : "Executable missing") : "Disabled";
+    return '<div class="adapter-row"><div class="adapter-info"><strong>' + esc(a.name) +
+      '</strong><small>' + esc(a.id) + ' · ' + esc(a.program) + ' · ' + state +
+      (a.kind === "builtin" ? " · Built in" : " · Custom") + '</small></div>' +
+      '<button type="button" data-adapter-act="check" data-adapter-id="' + esc(a.id) + '">Check</button>' +
+      (a.kind === "custom" ?
+        '<button type="button" data-adapter-act="edit" data-adapter-id="' + esc(a.id) + '">Edit</button>' +
+        '<button type="button" data-adapter-act="clone" data-adapter-id="' + esc(a.id) + '">Clone</button>' +
+        '<button type="button" class="danger" data-adapter-act="delete" data-adapter-id="' + esc(a.id) + '">Delete</button>' :
+        '') + '</div>';
+  }).join("");
+}
+
+async function loadAdapters() {
+  adapterItems = await api("GET", "/api/adapters");
+  renderSettings();
+}
+async function openSettings() {
+  $("settings-modal").hidden = false;
+  showSettingsError("");
+  try { await loadAdapters(); } catch (e) { showSettingsError(e.message); }
+}
+const closeSettings = () => {
+  $("settings-modal").hidden = true;
+  $("adapter-editor").hidden = true;
+};
+$("settings-btn").addEventListener("click", openSettings);
+$("settings-close").addEventListener("click", closeSettings);
+$("settings-modal").addEventListener("mousedown", (e) => {
+  if (e.target === $("settings-modal")) closeSettings();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("settings-modal").hidden) closeSettings();
+});
+
+$("setting-default").addEventListener("change", async (e) => {
+  try {
+    const value = e.target.value;
+    await api("PATCH", "/api/settings", { defaultHarness: value });
+    defaultHarness = value;
+    renderSettings();
+  } catch (err) { showSettingsError(err.message); renderSettings(); }
+});
+$("setting-primary").addEventListener("change", async (e) => {
+  try {
+    await api("PATCH", "/api/settings", { primaryBotId: e.target.value });
+    await load();
+    renderSettings();
+  } catch (err) { showSettingsError(err.message); renderSettings(); }
+});
+$("setting-primary-harness").addEventListener("change", async (e) => {
+  const p = primary();
+  if (!p) return;
+  try {
+    const previous = p.harness;
+    const changed = await api("PATCH", "/api/bots/" + encodeURIComponent(p.id), { harness: e.target.value });
+    upsertBot(changed);
+    delete modelLists[previous];
+    delete modelLists[changed.harness];
+    modelBarKey = "";
+    render();
+    renderSettings();
+  } catch (err) { showSettingsError(err.message); renderSettings(); }
+});
+
+function openAdapterEditor(spec = {}) {
+  editingAdapterId = spec.id || null;
+  $("adapter-editor").hidden = false;
+  $("adapter-editor-title").textContent = editingAdapterId ? "Edit " + spec.name : "Create adapter";
+  $("adapter-id").disabled = !!editingAdapterId;
+  $("adapter-name").value = spec.name || "";
+  $("adapter-id").value = spec.id || "";
+  $("adapter-program").value = spec.program || "";
+  $("adapter-output").value = spec.output || "text";
+  $("adapter-session").value = spec.session || "none";
+  $("adapter-model-format").value = spec.model_format || "lines";
+  $("adapter-stdin").checked = !!spec.stdin;
+  $("adapter-enabled").checked = spec.enabled !== false;
+  for (const name of adapterFields) {
+    const field = name.replaceAll("-", "_");
+    $("adapter-" + name).value = (spec[field] || []).join("\n");
+  }
+  $("adapter-models").value = (spec.model_list || []).map((m) =>
+    m.id + (m.label && m.label !== m.id || m.efforts?.length
+      ? " | " + (m.label || m.id) + " | " + (m.efforts || []).join(",")
+      : "")).join("\n");
+  $("adapter-rules").value = spec.event_rules?.length ? JSON.stringify(spec.event_rules, null, 2) : "";
+  $("adapter-editor").scrollIntoView({ behavior: "smooth", block: "start" });
+  $("adapter-name").focus();
+}
+function readAdapterEditor() {
+  const model_list = lines($("adapter-models").value).map((l) => {
+    const columns = l.split("|").map((p) => p.trim());
+    return { id: columns[0], label: columns[1] || columns[0], efforts: (columns[2] || "").split(",").map((e) => e.trim()).filter(Boolean), aliases: [] };
+  });
+  let event_rules;
+  try {
+    event_rules = JSON.parse($("adapter-rules").value.trim() || "[]");
+    if (!Array.isArray(event_rules)) throw new Error("Rules must be an array.");
+  } catch (e) { throw new Error("Invalid JSONL event rules: " + e.message); }
+  const spec = {
+    id: $("adapter-id").value.trim(), name: $("adapter-name").value.trim(),
+    program: $("adapter-program").value.trim(), output: $("adapter-output").value,
+    session: $("adapter-session").value, model_format: $("adapter-model-format").value,
+    stdin: $("adapter-stdin").checked, enabled: $("adapter-enabled").checked,
+    model_list, event_rules
+  };
+  for (const name of adapterFields) spec[name.replaceAll("-", "_")] = lines($("adapter-" + name).value);
+  return spec;
+}
+$("adapter-new").addEventListener("click", () => openAdapterEditor({
+  args: ["{{full_prompt}}"], model_args: ["--model", "{{model}}"],
+  output: "text", session: "none", enabled: true
+}));
+$("adapter-agy").addEventListener("click", () => openAdapterEditor({
+  id: "agy", name: "Agy", program: "agy",
+  args: ["--print", "{{full_prompt}}"], model_args: ["--model", "{{model}}"],
+  // Starter only: verify agy's installed version, CLI flags, and authentication before use.
+  output: "text", session: "none", enabled: true
+}));
+$("adapter-cancel").addEventListener("click", () => { $("adapter-editor").hidden = true; });
+$("adapter-editor").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const spec = readAdapterEditor();
+    await api(editingAdapterId ? "PATCH" : "POST",
+      editingAdapterId ? "/api/adapters/" + encodeURIComponent(editingAdapterId) : "/api/adapters", spec);
+    delete modelLists[spec.id];
+    modelBarKey = "";
+    $("adapter-editor").hidden = true;
+    showSettingsError("");
+    await loadAdapters();
+    await load();
+  } catch (err) { showSettingsError(err.message); }
+});
+$("adapter-list").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-adapter-act]");
+  if (!b) return;
+  const action = b.dataset.adapterAct;
+  const id = b.dataset.adapterId;
+  const item = adapterItems.find((a) => a.id === id);
+  if (!item) return;
+  if (action === "edit") return openAdapterEditor(item.spec);
+  if (action === "clone") return openAdapterEditor({
+    ...item.spec, id: item.id + "-copy", name: item.name + " copy"
+  });
+  if (action === "check") {
+    try {
+      const result = await api("POST", "/api/adapters/" + encodeURIComponent(id) + "/check");
+      showSettingsError(item.name + ": " + result.message);
+    } catch (err) { showSettingsError(err.message); }
+    return;
+  }
+  if (action === "delete" && confirm("Delete adapter " + item.name + "? Bots must be reassigned first.")) {
+    try {
+      await api("DELETE", "/api/adapters/" + encodeURIComponent(id));
+      delete modelLists[id];
+      modelBarKey = "";
+      showSettingsError("");
+      await loadAdapters();
+    } catch (err) { showSettingsError(err.message); }
+  }
+});
