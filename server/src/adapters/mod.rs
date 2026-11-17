@@ -5,12 +5,16 @@
 mod claude;
 mod codex;
 mod pi;
+mod custom;
+pub use custom::Spec;
 
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, RwLock};
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 
@@ -39,42 +43,98 @@ pub struct RunInput {
     pub env: HashMap<String, String>,
     /// A private folder for this Bot's harness files.
     pub state_dir: PathBuf,
+    /// Bounded recent chat history used by stateless custom CLIs.
+    pub history: Vec<(String, String)>,
 }
 
 pub trait Adapter: Send {
-    fn bin(&self) -> &'static str;
+    fn bin(&self) -> &str;
     /// Command-line arguments. May emit events up front (e.g. a session id it chose).
     fn args(&mut self, input: &RunInput, out: &mut Vec<AgentEvent>) -> Vec<String>;
     /// Map one JSON line from the harness to zero or more events.
     fn on_event(&mut self, e: &Value, out: &mut Vec<AgentEvent>);
+    fn on_line(&mut self, line: &[u8], out: &mut Vec<AgentEvent>) {
+        if let Ok(v) = serde_json::from_slice::<Value>(line) { self.on_event(&v, out); }
+    }
+    fn stdin_text(&self, _input: &RunInput) -> Option<String> { None }
+    fn finish(&mut self, _out: &mut Vec<AgentEvent>) {}
     /// Models this harness can run here, with their reasoning efforts. Blocking.
     fn models(&self) -> Vec<ModelOption>;
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ModelOption {
     pub id: String,
     pub label: String,
     /// Efforts this model accepts. Empty = no effort setting.
+    #[serde(default)]
     pub efforts: Vec<String>,
     /// Other names the harness accepts for this model (e.g. "opus").
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub aliases: Vec<String>,
 }
 
-/// Model lists, cached for 10 minutes per harness (listing can take a second).
-pub fn models(name: &str) -> Vec<ModelOption> {
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-    static CACHE: Mutex<Option<HashMap<String, (Instant, Vec<ModelOption>)>>> = Mutex::new(None);
-    if let Some((at, list)) = CACHE.lock().unwrap().get_or_insert_default().get(name) {
-        if at.elapsed() < Duration::from_secs(600) && !list.is_empty() {
-            return list.clone();
-        }
+// Shared runtime registry; only built-in Rust adapters need a code change.
+static CUSTOM: OnceLock<RwLock<HashMap<String, Spec>>> = OnceLock::new();
+type ModelCache = HashMap<String, (std::time::Instant, Vec<ModelOption>)>;
+static MODEL_CACHE: OnceLock<Mutex<ModelCache>> = OnceLock::new();
+
+fn custom() -> &'static RwLock<HashMap<String, Spec>> {
+    CUSTOM.get_or_init(|| RwLock::new(HashMap::new()))
+}
+fn cache() -> &'static Mutex<ModelCache> {
+    MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+pub fn load_custom(specs: Vec<Spec>) {
+    *custom().write().unwrap() = specs.into_iter().map(|s| (s.id.clone(), s)).collect();
+    cache().lock().unwrap().clear();
+}
+pub fn put_custom(spec: Spec) {
+    cache().lock().unwrap().remove(&spec.id);
+    custom().write().unwrap().insert(spec.id.clone(), spec);
+}
+pub fn delete_custom(id: &str) {
+    custom().write().unwrap().remove(id);
+    cache().lock().unwrap().remove(id);
+}
+pub fn custom_specs() -> Vec<Spec> {
+    let mut v: Vec<_> = custom().read().unwrap().values().cloned().collect();
+    v.sort_by(|a, b| a.name.cmp(&b.name));
+    v
+}
+pub fn names() -> Vec<String> {
+    let mut v: Vec<String> = NAMES.into_iter().map(str::to_owned).collect();
+    v.extend(custom_specs().into_iter().filter(|s| s.enabled).map(|s| s.id));
+    v
+}
+pub fn on_path(bin: &str) -> bool {
+    if bin.is_empty() { return false; }
+    let executable = |p: &Path| {
+        use std::os::unix::fs::PermissionsExt;
+        p.is_file() && p.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    };
+    if bin.contains('/') { return executable(Path::new(bin)); }
+    std::env::var_os("PATH").into_iter().flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .any(|dir| executable(&dir.join(bin)))
+}
+
+/// Model lists, cached for ten minutes per harness. Discovery failures surface to the UI.
+pub fn models(name: &str) -> Result<Vec<ModelOption>, String> {
+    use std::time::Duration;
+    let adapter = get(name).ok_or_else(|| format!("Unknown or disabled adapter: {name}"))?;
+    if !on_path(adapter.bin()) {
+        return Err(format!("Executable '{}' for {name} is not available to the botd user.", adapter.bin()));
     }
-    let list = get(name).map(|a| a.models()).unwrap_or_default();
-    CACHE.lock().unwrap().get_or_insert_default().insert(name.into(), (Instant::now(), list.clone()));
-    list
+    if let Some((at, list)) = cache().lock().unwrap().get(name) {
+        if at.elapsed() < Duration::from_secs(600) { return Ok(list.clone()); }
+    }
+    let list = adapter.models();
+    if list.is_empty() && NAMES.contains(&name) {
+        return Err(format!("No models discovered for {name}. Check CLI authentication and its model-list command as the botd user."));
+    }
+    cache().lock().unwrap().insert(name.to_owned(), (std::time::Instant::now(), list.clone()));
+    Ok(list)
 }
 
 /// Runs a command and returns its stdout, or "" if it fails.
@@ -90,7 +150,7 @@ pub fn output(bin: &str, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// To add a harness: write one adapter file and list it here.
+/// The bundled agents stay native; user-defined agents run through the generic CLI adapter.
 pub const NAMES: [&str; 3] = ["claude", "codex", "pi"];
 
 pub fn get(name: &str) -> Option<Box<dyn Adapter>> {
@@ -98,23 +158,14 @@ pub fn get(name: &str) -> Option<Box<dyn Adapter>> {
         "claude" => Some(Box::new(claude::Claude::default())),
         "codex" => Some(Box::new(codex::Codex)),
         "pi" => Some(Box::new(pi::Pi)),
-        _ => None,
+        _ => custom().read().unwrap().get(name).filter(|s| s.enabled)
+            .cloned().map(|s| Box::new(custom::Custom::new(s)) as Box<dyn Adapter>),
     }
 }
 
-/// Harnesses whose CLI is on PATH.
-pub fn installed() -> Vec<&'static str> {
-    NAMES
-        .into_iter()
-        .filter(|n| {
-            let bin = get(n).unwrap().bin();
-            std::process::Command::new("sh")
-                .args(["-c", &format!("command -v {bin}")])
-                .stdout(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        })
-        .collect()
+/// Enabled harnesses whose executable is available on the service's PATH.
+pub fn installed() -> Vec<String> {
+    names().into_iter().filter(|name| get(name).is_some_and(|a| on_path(a.bin()))).collect()
 }
 
 /// Why a run was cut short.
@@ -130,12 +181,13 @@ pub async fn run(
     let mut out = Vec::new();
     let args = adapter.args(&input, &mut out);
     out.drain(..).for_each(&mut emit);
+    let stdin_text = adapter.stdin_text(&input);
 
     let mut child = match Command::new(adapter.bin())
         .args(&args)
         .current_dir(&input.cwd)
         .envs(&input.env)
-        .stdin(Stdio::null())
+        .stdin(if stdin_text.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0) // own group, so stop kills the whole tree
@@ -145,6 +197,11 @@ pub async fn run(
         Ok(c) => c,
         Err(e) => return emit(AgentEvent::Error(format!("Couldn't start {}: {e}", adapter.bin()))),
     };
+    if let Some(contents) = stdin_text {
+        if let Some(mut stdin) = child.stdin.take() {
+            tokio::spawn(async move { let _ = stdin.write_all(contents.as_bytes()).await; });
+        }
+    }
     let pid = child.id();
 
     let mut stderr = child.stderr.take().unwrap();
@@ -162,8 +219,7 @@ pub async fn run(
         tokio::select! {
             line = lines.next_segment() => match line {
                 Ok(Some(bytes)) => {
-                    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { continue };
-                    adapter.on_event(&v, &mut out);
+                    adapter.on_line(&bytes, &mut out);
                     for e in out.drain(..) {
                         saw_error |= matches!(e, AgentEvent::Error(_));
                         emit(e);
@@ -184,6 +240,10 @@ pub async fn run(
         }
     }
     let status = child.wait().await;
+    if !aborted && status.as_ref().is_ok_and(|s| s.success()) {
+        adapter.finish(&mut out);
+        for e in out.drain(..) { saw_error |= matches!(e, AgentEvent::Error(_)); emit(e); }
+    }
     let stderr = stderr_task.await.unwrap_or_default();
     let ok = status.as_ref().is_ok_and(|s| s.success());
     if !ok && !saw_error && !aborted {
