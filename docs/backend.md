@@ -28,7 +28,82 @@ Each adapter is one file in `server/src/adapters/`. It builds the command line a
 
 All three run with permission prompts off (`--dangerously-skip-permissions` and equivalents). The server is the computer, so treat it that way. Approvals are not built yet.
 
-Add a harness: write one adapter file and add it to `get()` and `NAMES` in `adapters/mod.rs`.
+### Configurable custom adapters
+
+Open **Settings & Adapters** (the button at the bottom of the sidebar) to
+add, edit, clone, check, disable or delete custom CLI adapters. The built-in
+Claude Code, Codex and Pi adapters are retained unchanged.
+
+To create an adapter, supply an ID, name, executable, arguments and output
+format. The program must already be installed and usable by the botd service
+user. This is not an installer or a code-plugin loader. Use noninteractive
+CLIs: an interactive TTY agent may require a future transport driver.
+
+The registry, primary-bot selection and default adapter for newly created
+bots persist in SQLite. DEFAULT_HARNESS and PRIMARY_BOT_NAME are first-run
+fallbacks. Changing the default never silently changes existing bots.
+The primary bot's harness can be selected independently from the UI.
+
+**Argument placeholders** are replaced within individual process arguments,
+without a shell: \`{{prompt}}\`, \`{{full_prompt}}\`, \`{{system}}\`,
+\`{{model}}\`, \`{{effort}}\`, \`{{session_id}}\`, \`{{state_dir}}\`,
+and \`{{cwd}}\`. A multiline argument is still a single argument, not
+multiple words. If stdin mode is enabled, the full prompt is also sent
+to stdin. Model/effort arguments are only appended when selected, and are
+placed before the base (positional) prompt arguments.
+
+**Output** can be plain text or JSONL:
+- Text: stdout lines become a live draft and one final chat reply.
+  There is no tool or structured session telemetry.
+- JSONL: define mappings such as the example below. Dot-separated
+  value paths can address nested objects and array indexes. Supported
+  event kinds: session, delta, text, tool, error.
+
+\`\`\`json
+[
+  {"kind":"session","when_path":"type","equals":"session","value_path":"sessionId"},
+  {"kind":"delta","when_path":"type","equals":"delta","value_path":"text"},
+  {"kind":"text","when_path":"type","equals":"message","value_path":"message.text"},
+  {"kind":"tool","when_path":"type","equals":"tool","name_path":"name","detail_path":"command"},
+  {"kind":"error","when_path":"type","equals":"error","value_path":"message"}
+]
+\`\`\`
+
+**Session strategies:** none, generated, or event. Stateless agents receive
+the bot's rules, memory, and bounded recent conversation history each run.
+For generated sessions, include the \`{{session_id}}\` placeholder in start
+and resume arguments if the CLI supports an explicit ID. For event sessions,
+provide a JSONL session event rule and resume arguments. Harness sessions
+cannot be resumed across different agents.
+
+**Models:** enter manual IDs, optionally with labels/effort values, or
+configure a noninteractive model-discovery command. The command output may
+be JSON (array or object with a models array, IDs or model objects) or one
+model ID per line. Manual models are used if dynamic discovery yields none.
+For example, an Agy starter profile can use program agy with --print and
+\`{{full_prompt}}\` as two separate arguments. Verify that your installed
+Agy version actually supports the chosen flags and authentication; the
+starter is a template rather than a guaranteed compatibility adapter.
+
+**Validation and safety:** the UI's Check button verifies executable
+presence and permissions, not credentials or a successful agent run.
+Actual agent execution happens when a bot sends a message. Administrator
+settings/adapter mutation endpoints require browser Basic authentication
+when AUTH_PASSWORD is configured; bot bearer tokens are rejected. When no
+password is set, the server refuses to listen on a public address.
+Custom CLI configuration is equivalent to granting server-side code
+execution. Use only in a trusted single-user deployment with a non-root
+service account and host isolation; arguments are not shell-evaluated.
+
+Switching a bot's harness while it runs is blocked. When switched while
+idle, its previous session ID, model and effort are cleared. Its memory,
+chat history, and routines survive. On upgrade, known old Claude model
+selections erroneously saved on Codex bots are reset automatically.
+
+To add a *new protocol* rather than a compatible CLI, implement a shared
+transport driver or native Rust adapter. The generic editor cannot decode
+unknown interactive/binary protocols without code.
+
 
 ## Run it
 
