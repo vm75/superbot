@@ -337,9 +337,11 @@ mod tests {
         s.program = "/bin/cat".into();
         s.stdin = true;
         s.args.clear();
+        let mut input = input();
+        input.model = None; // /bin/cat has no model flag
         let (_tx, rx) = tokio::sync::watch::channel(None);
         let mut result = Vec::new();
-        super::super::run(Box::new(Custom::new(s)), input(), rx, |e| {
+        super::super::run(Box::new(Custom::new(s)), input, rx, |e| {
             if let AgentEvent::Text(text) = e { result.push(text); }
         }).await;
         assert_eq!(result.len(), 1);
