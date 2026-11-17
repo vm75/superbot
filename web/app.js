@@ -692,7 +692,7 @@ function openAdapterEditor(spec = {}, existing = false) {
   $("adapter-program").value = spec.program || "";
   $("adapter-output").value = spec.output || "text";
   $("adapter-session").value = spec.session || "none";
-  $("adapter-model-format").value = spec.model_format || "lines";
+  $("adapter-model-format").value = spec.model_format || "auto";
   $("adapter-stdin").checked = !!spec.stdin;
   $("adapter-enabled").checked = spec.enabled !== false;
   for (const name of adapterFields) {
@@ -731,12 +731,16 @@ $("adapter-new").addEventListener("click", () => openAdapterEditor({
   args: ["{{full_prompt}}"], model_args: ["--model", "{{model}}"],
   output: "text", session: "none", enabled: true
 }));
-$("adapter-agy").addEventListener("click", () => openAdapterEditor({
-  id: "agy", name: "Agy", program: "agy",
-  args: ["--print", "{{full_prompt}}"], model_args: ["--model", "{{model}}"],
-  // Starter only: verify agy's installed version, CLI flags, and authentication before use.
-  output: "text", session: "none", enabled: true
-}));
+$("adapter-starters").addEventListener("click", async (e) => {
+  const id = e.target.closest("[data-starter]")?.dataset.starter;
+  if (!id) return;
+  try {
+    const starters = await api("GET", "/api/adapter-starters");
+    const spec = starters.find((s) => s.id === id);
+    if (!spec) throw new Error("Starter unavailable. Reload the page.");
+    openAdapterEditor(spec);
+  } catch (err) { showSettingsError(err.message); }
+});
 $("adapter-cancel").addEventListener("click", () => { $("adapter-editor").hidden = true; });
 $("adapter-editor").addEventListener("submit", async (e) => {
   e.preventDefault();

@@ -102,6 +102,7 @@ async fn main() {
         .route("/events", get(events))
         .route("/harnesses/{name}/models", get(list_models))
         .route("/adapters", get(list_adapters).post(create_adapter))
+        .route("/adapter-starters", get(|| async { Json(adapters::starters()) }))
         .route("/adapters/{id}", patch(update_adapter).delete(delete_adapter))
         .route("/adapters/{id}/check", post(check_adapter))
         .route("/settings", patch(update_settings))

@@ -34,6 +34,16 @@ Open **Settings & Adapters** (the button at the bottom of the sidebar) to
 add, edit, clone, check, disable or delete custom CLI adapters. The built-in
 Claude Code, Codex and Pi adapters are retained unchanged.
 
+**Starters:** Agy, Aider, and OpenCode buttons prefill editable definitions with
+automatic model discovery. Agy uses `--print`; Aider uses `--message` with
+plain output, noninteractive confirmations, separate history files, and automatic
+commits disabled; OpenCode uses `run`, with model options after the subcommand.
+All three include chat context on each run. Install and authenticate the CLI
+as the server user before saving and selecting the adapter. Aider lists known
+models, which can include providers without configured credentials.
+See the [Aider options](https://aider.chat/docs/config/options.html) and
+[OpenCode commands](https://opencode.ai/docs/cli/commands/) references.
+
 To create an adapter, supply an ID, name, executable, arguments and output
 format. The program must already be installed and usable by the botd service
 user. This is not an installer or a code-plugin loader. Use noninteractive
@@ -76,10 +86,19 @@ and resume arguments if the CLI supports an explicit ID. For event sessions,
 provide a JSONL session event rule and resume arguments. Harness sessions
 cannot be resumed across different agents.
 
-**Models:** enter manual IDs, optionally with labels/effort values, or
-configure a noninteractive model-discovery command. The command output may
-be JSON (array or object with a models array, IDs or model objects) or one
-model ID per line. Manual models are used if dynamic discovery yields none.
+**Models:** custom adapters automatically inspect CLI help for `--list-models`,
+`models`, or `models list`. Discovery accepts JSON model arrays, one ID per
+line, or tab-separated IDs and labels (including `agy models`). A documented
+`--json` flag is used when available. Help inspection and listing share a
+12-second timeout; results use the same ten-minute cache as built-in adapters.
+Existing custom adapters gain this behavior without being recreated.
+
+An explicit model-discovery command overrides automatic detection. Its output
+may be JSON (array or object with a models array, IDs or model objects) or one
+model ID per line, according to the selected format. Auto detect also accepts
+tab-separated labels and bullet lists. Manual models, optionally
+with labels/effort values, are the fallback when discovery yields none. CLIs
+without a supported listing need an explicit command or manual models.
 For example, an Agy starter profile can use program agy with --print and
 `{{full_prompt}}` as two separate arguments. Verify that your installed
 Agy version actually supports the chosen flags and authentication; the
@@ -108,11 +127,16 @@ unknown interactive/binary protocols without code.
 ## Run it
 
 ```sh
-cargo build --release          # makes target/release/botd and target/release/botctl
-cp .env.example .env           # fill it in
-set -a; . ./.env; set +a
-./target/release/botd
+make setup                    # creates .env without overwriting it
+# Edit .env with your settings.
+make run                      # builds both release binaries and loads .env
 ```
+
+`make dev` runs a debug build. Use `make check`, `make test`, and `make lint`
+for validation; `make help` lists all targets. `make run ENV_FILE=<path>` loads
+a different environment file. Environment files use shell assignment syntax;
+quote values containing spaces. Without a file, exported variables and server
+defaults apply.
 
 Settings are in [.env.example](../.env.example). Keep `botctl` next to `botd`: the server puts that folder on the Bots' PATH.
 

@@ -61,13 +61,15 @@ Every Bot gets a robot. Pick one of 12 shapes and 11 colors when you create it.
 ## Quick start
 
 ```sh
-cargo build --release          # makes target/release/botd and target/release/botctl
-cp .env.example .env           # fill it in
-set -a; . ./.env; set +a
-./target/release/botd
+make setup                    # creates .env without overwriting it
+# Edit .env with your settings.
+make run                      # builds both release binaries and loads .env
 ```
 
 Then open the web app and say hi to SuperBot. Install and log in to the agent CLIs you want (`claude`, `codex`, `pi`) as the same user that runs `botd`.
+
+Run `make help` for build, development, test, and lint commands. Custom adapter
+starters for Agy, Aider, and OpenCode are in **Settings & Adapters**.
 
 Deploying on a VPS: see [Backend](docs/backend.md).
 

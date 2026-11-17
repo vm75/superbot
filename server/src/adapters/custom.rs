@@ -102,8 +102,8 @@ impl Spec {
         if !self.model_command.is_empty() && self.model_command[0].trim().is_empty() {
             return Err("Model discovery needs an executable.".into());
         }
-        if !["", "lines", "json"].contains(&self.model_format.as_str()) {
-            return Err("Model format must be lines or json.".into());
+        if !["", "auto", "lines", "json"].contains(&self.model_format.as_str()) {
+            return Err("Model format must be auto, lines, or json.".into());
         }
         for r in &self.event_rules {
             if !["session", "delta", "text", "tool", "error"].contains(&r.kind.as_str()) {
@@ -199,14 +199,14 @@ impl Adapter for Custom {
         });
         // Put options before the positional prompt; many CLIs stop option parsing there.
         let mut args = Vec::new();
-        if input.model.is_some() { self.append(&mut args, &self.spec.model_args, input, &session); }
-        if input.effort.is_some() { self.append(&mut args, &self.spec.effort_args, input, &session); }
         if input.session_id.is_some() {
             self.append(&mut args, &self.spec.resume_args, input, &session);
         } else {
             self.append(&mut args, &self.spec.start_args, input, &session);
             if self.spec.session == "generated" { out.push(AgentEvent::Session(session.clone())); }
         }
+        if input.model.is_some() { self.append(&mut args, &self.spec.model_args, input, &session); }
+        if input.effort.is_some() { self.append(&mut args, &self.spec.effort_args, input, &session); }
         self.append(&mut args, &self.spec.args, input, &session);
         args
     }
@@ -246,38 +246,115 @@ impl Adapter for Custom {
     }
 
     fn models(&self) -> Vec<ModelOption> {
-        if self.spec.model_command.is_empty() { return self.spec.model_list.clone(); }
-        let parts = &self.spec.model_command;
-        let executable = if parts[0] == "{{program}}" { &self.spec.program } else { &parts[0] };
-        // Kill a stuck model-discovery command rather than blocking a server worker forever.
-        let result = Command::new("timeout").args(["--kill-after=2s", "12s"])
-            .arg(executable).args(&parts[1..])
-            .stdin(Stdio::null()).stderr(Stdio::null()).output();
-        let Ok(result) = result else { return self.spec.model_list.clone(); };
-        if !result.status.success() { return self.spec.model_list.clone(); }
-        let text = String::from_utf8_lossy(&result.stdout);
-        let dynamic: Vec<ModelOption> = if self.spec.model_format == "json" {
-            let data: Value = serde_json::from_str(&text).unwrap_or_default();
-            let items = data.as_array().or_else(|| data.get("models").and_then(Value::as_array));
-            items.into_iter().flatten().filter_map(|v| {
-                if let Some(id) = v.as_str() {
-                    Some(ModelOption { id: id.into(), label: id.into(), efforts: vec![], aliases: vec![] })
-                } else {
-                    let id = v["id"].as_str().or(v["name"].as_str())?;
-                    Some(ModelOption {
-                        id: id.into(),
-                        label: v["label"].as_str().or(v["display_name"].as_str()).unwrap_or(id).into(),
-                        efforts: v["efforts"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(str::to_owned)).collect(),
-                        aliases: vec![],
-                    })
-                }
-            }).collect()
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        let dynamic = if self.spec.model_command.is_empty() {
+            auto_models(&self.spec.program, deadline)
         } else {
-            text.lines().map(str::trim).filter(|line| !line.is_empty())
-                .map(|id| ModelOption { id: id.into(), label: id.into(), efforts: vec![], aliases: vec![] }).collect()
+            let parts = &self.spec.model_command;
+            let executable = if parts[0] == "{{program}}" { &self.spec.program } else { &parts[0] };
+            model_output(executable, &parts[1..], deadline)
+                .map(|text| parse_models(&text, &self.spec.model_format))
+                .unwrap_or_default()
         };
         if dynamic.is_empty() { self.spec.model_list.clone() } else { dynamic }
     }
+
+}
+
+// One time budget covers help inspection and discovery. Never launch an interactive prompt.
+fn model_output(program: &str, args: &[String], deadline: std::time::Instant) -> Option<String> {
+    let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+    let result = Command::new("timeout")
+        .args(["--kill-after=2s", &format!("{:.3}s", remaining.as_secs_f64().max(0.001))])
+        .arg(program).args(args)
+        .stdin(Stdio::null()).stderr(Stdio::piped()).output().ok()?;
+    result.status.success().then(|| {
+        let mut text = String::from_utf8_lossy(&result.stdout).into_owned();
+        // Go and other CLI frameworks write help to stderr even on success.
+        if args.last().is_some_and(|arg| arg == "--help") {
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&result.stderr));
+        }
+        text
+    })
+}
+
+fn advertises(help: &str, command: &str) -> bool {
+    help.lines().any(|line| line.split_whitespace().next()
+        .is_some_and(|word| word.trim_end_matches(',') == command))
+}
+
+fn auto_models(program: &str, deadline: std::time::Instant) -> Vec<ModelOption> {
+    let Some(help) = model_output(program, &["--help".into()], deadline) else { return vec![]; };
+    let (mut args, model_help) = if advertises(&help, "--list-models") {
+        // Required filter semantics vary; use an explicit discovery command.
+        if help.lines().filter_map(|line| line.trim().strip_prefix("--list-models "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(|word| word.trim_end_matches(','))
+            .any(|word| word.chars().any(|c| c.is_ascii_uppercase())
+                && word.chars().all(|c| c.is_ascii_uppercase() || c == '_')) {
+            return vec![];
+        }
+        (vec!["--list-models".into()], String::new())
+    } else if advertises(&help, "models") || help.lines().any(|line| {
+        let mut words = line.split_whitespace();
+        words.next() == Path::new(program).file_name().and_then(|name| name.to_str())
+            && words.next() == Some("models")
+    }) {
+        // Some CLIs use `models list`; others (including Agy) list directly.
+        let help = model_output(program, &["models".into(), "--help".into()], deadline).unwrap_or_default();
+        let mut args = vec!["models".into()];
+        if advertises(&help, "list") { args.push("list".into()); }
+        if args.len() == 2 {
+            let help = model_output(program, &["models".into(), "list".into(), "--help".into()], deadline)
+                .unwrap_or_default();
+            (args, help)
+        } else {
+            (args, help)
+        }
+    } else {
+        return vec![];
+    };
+    // Prefer structured output only when this model command documents the flag.
+    if advertises(&model_help, "--json") { args.push("--json".into()); }
+    model_output(program, &args, deadline)
+        .map(|text| parse_models(&text, "auto")).unwrap_or_default()
+}
+
+fn parse_models(text: &str, format: &str) -> Vec<ModelOption> {
+    if format == "json" || format == "auto" {
+        if let Ok(data) = serde_json::from_str::<Value>(text) {
+            let items = data.as_array().or_else(|| data.get("models").and_then(Value::as_array));
+            return items.into_iter().flatten().filter_map(|v| {
+                let id = v.as_str().or_else(|| v["id"].as_str())
+                    .or_else(|| v["slug"].as_str()).or_else(|| v["name"].as_str())?;
+                if id.trim().is_empty() { return None; }
+                Some(ModelOption {
+                    id: id.into(),
+                    label: v.get("label").and_then(Value::as_str)
+                        .or_else(|| v.get("display_name").and_then(Value::as_str)).unwrap_or(id).into(),
+                    efforts: v.get("efforts").and_then(Value::as_array).into_iter().flatten()
+                        .filter_map(|e| e.as_str().map(str::to_owned)).collect(),
+                    aliases: vec![],
+                })
+            }).collect();
+        }
+        if format == "json" { return vec![]; }
+    }
+    text.lines().map(str::trim).filter(|line| !line.is_empty()).filter_map(|line| {
+        if format != "auto" {
+            return Some(ModelOption { id: line.into(), label: line.into(), efforts: vec![], aliases: vec![] });
+        }
+        let line = line.strip_prefix("- ").unwrap_or(line);
+        let (id, label) = line.split_once('\t').map(|(id, label)| (id.trim(), label.trim()))
+            .unwrap_or((line, line));
+        // Reject progress messages, headings and prose instead of offering them as models.
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:/".contains(c))
+            || ["id", "model", "models"].contains(&id.to_ascii_lowercase().as_str()) {
+            return None;
+        }
+        Some(ModelOption { id: id.into(), label: if label.is_empty() { id } else { label }.into(), efforts: vec![], aliases: vec![] })
+    }).collect()
 }
 
 #[cfg(test)]
@@ -300,6 +377,99 @@ mod tests {
             env: Default::default(), state_dir: "/tmp/state".into(),
             history: vec![("user".into(), "first".into()), ("assistant".into(), "answer".into())] }
     }
+    #[test]
+    fn model_output_formats() {
+        let models = parse_models("Fetching available models...\nmodel-one\tModel One\nmodel-two\tModel Two\n", "auto");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "model-one");
+        assert_eq!(models[0].label, "Model One");
+        let models = parse_models(r#"{"models":["one",{"id":"two","display_name":"Two","efforts":["high"]}]}"#, "auto");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1].efforts, ["high"]);
+        assert!(parse_models("Usage: agent models\nModel\n", "auto").is_empty());
+        assert!(parse_models("not json", "json").is_empty());
+        assert_eq!(parse_models("one\ntwo\n", "lines").len(), 2);
+    }
+
+    fn mock_models(script: &str, configure: impl FnOnce(&mut Spec)) -> Vec<ModelOption> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("superbot-models-{}", new_uuid()));
+        std::fs::write(&path, format!("#!/bin/sh\n{script}")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut s = spec();
+        s.program = path.to_str().unwrap().into();
+        configure(&mut s);
+        let models = Custom::new(s).models();
+        std::fs::remove_file(path).unwrap();
+        models
+    }
+
+    #[test]
+    fn automatic_model_commands() {
+        for (help, command) in [("--list-models List models", "--list-models"), ("models List models", "models")] {
+            let script = format!(r#"
+case "$*" in
+  --help) echo '{help}';;
+  'models --help') echo 'Usage: agent models';;
+  '{command}') printf 'Fetching models...\nmodel-one\tModel One\n';;
+  *) exit 1;;
+esac
+"#);
+            let models = mock_models(&script, |_| {});
+            assert_eq!(models.len(), 1);
+            assert_eq!(models[0].label, "Model One");
+        }
+        let models = mock_models(r#"
+case "$*" in
+  --help) echo 'models Manage models';;
+  'models --help') echo 'list List models';;
+  'models list --help') echo '--json JSON output';;
+  'models list --json') echo '[{"id":"one","label":"One"}]';;
+  *) exit 1;;
+esac
+"#, |_| {});
+        assert_eq!(models[0].id, "one");
+        let models = mock_models(r#"
+case "$1" in
+  --help) echo '--list-models MODEL, --models MODEL' >&2;;
+  --list-models)
+    [ "$#" = 2 ] && [ "$2" = / ] || exit 1
+    printf 'Models which match "/":\n- provider/model-one\n';;
+  *) exit 1;;
+esac
+"#, |s| {
+            s.model_command = vec!["{{program}}".into(), "--list-models".into(), "/".into()];
+            s.model_format = "auto".into();
+        });
+        assert_eq!(models[0].id, "provider/model-one");
+    }
+
+    #[test]
+    fn explicit_command_and_manual_fallback() {
+        let script = r#"
+case "$*" in
+  catalog) echo 'custom-model';;
+  *) exit 1;;
+esac
+"#;
+        let models = mock_models(script, |s| s.model_command = vec!["{{program}}".into(), "catalog".into()]);
+        assert_eq!(models[0].id, "custom-model");
+        let models = mock_models(script, |s| s.model_list = vec![ModelOption {
+            id: "fallback".into(), label: "Fallback".into(), efforts: vec![], aliases: vec![]
+        }]);
+        assert_eq!(models[0].id, "fallback");
+        assert!(mock_models(r#"
+if [ "$*" = --help ]; then echo 'Usage: agent'; else echo 'must-not-run'; fi
+"#, |_| {}).is_empty());
+    }
+
+    #[test]
+    fn discovery_timeout() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(30);
+        assert!(model_output("/bin/sleep", &["2".into()], deadline).is_none());
+        assert!(model_output("/bin/echo", &["late".into()], deadline).is_none());
+    }
+
     #[test]
     fn template_and_history() {
         let mut a = Custom::new(spec());

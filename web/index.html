@@ -125,7 +125,9 @@
         <p class="settings-note">Changing a bot's adapter clears its harness session, model and reasoning effort. Memory, chat and routines remain.</p>
         <div class="settings-heading">
           <h4>Adapters</h4>
-          <div><button type="button" class="nb-btn" id="adapter-agy">Agy starter</button>
+          <div id="adapter-starters"><button type="button" class="nb-btn" data-starter="agy">Agy starter</button>
+          <button type="button" class="nb-btn" data-starter="aider">Aider starter</button>
+          <button type="button" class="nb-btn" data-starter="opencode">OpenCode starter</button>
           <button type="button" class="nb-btn primary" id="adapter-new">Add adapter</button></div>
         </div>
         <p class="settings-note">Built-in adapters are always available when installed. Create custom CLI adapters below; only installed executables can run.</p>
@@ -138,7 +140,7 @@
             <label>Executable <input id="adapter-program" required placeholder="agent"></label>
             <label>Output <select id="adapter-output"><option value="text">Plain text</option><option value="jsonl">JSON lines</option></select></label>
             <label>Session handling <select id="adapter-session"><option value="none">Stateless (include chat context)</option><option value="generated">Generated session ID</option><option value="event">Session from JSON event</option></select></label>
-            <label>Model discovery format <select id="adapter-model-format"><option value="lines">One ID per line</option><option value="json">JSON model array</option></select></label>
+            <label>Model discovery format <select id="adapter-model-format"><option value="auto">Auto detect</option><option value="lines">One ID per line</option><option value="json">JSON model array</option></select></label>
           </div>
           <label class="settings-check"><input type="checkbox" id="adapter-stdin"> Send prompt via stdin instead of a command argument</label>
           <label>Command arguments <small>One argument per line. Use {{prompt}}, {{full_prompt}}, {{system}}, {{model}}, {{effort}}, {{session_id}}, {{state_dir}} or {{cwd}}.</small>
@@ -149,9 +151,9 @@
             <label>Start arguments <small>New session only</small><textarea id="adapter-start-args" rows="2"></textarea></label>
             <label>Resume arguments <small>Existing session only</small><textarea id="adapter-resume-args" rows="2"></textarea></label>
           </div>
-          <label>Model discovery command <small>Optional, one argument per line (the first is the executable). Use {{program}} for the configured executable.</small>
+          <label>Model discovery command <small>Leave blank to detect a model-list command from CLI help. Override with one argument per line; use {{program}} for the executable.</small>
             <textarea id="adapter-model-command" rows="2"></textarea></label>
-          <label>Manual models <small>Optional; one model ID per line, or ID | Display name | comma-separated efforts. Used if discovery is unavailable.</small>
+          <label>Manual models <small>Fallback if automatic discovery is unavailable. One model ID per line, or ID | Display name | comma-separated efforts.</small>
             <textarea id="adapter-models" rows="3"></textarea></label>
           <label>JSONL event rules <small>For JSONL output: JSON array of mappings. See docs/backend.md for the schema.</small>
             <textarea id="adapter-rules" rows="5" spellcheck="false" placeholder='[{"kind":"text","when_path":"type","equals":"message","value_path":"text"}]'></textarea></label>

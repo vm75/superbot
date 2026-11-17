@@ -6,7 +6,9 @@ mod claude;
 mod codex;
 mod pi;
 mod custom;
+mod starters;
 pub use custom::Spec;
+pub use starters::starters;
 
 use serde_json::Value;
 use std::collections::HashMap;
