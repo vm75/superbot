@@ -323,7 +323,7 @@ async fn create_adapter(State(app): State<AppState>, headers: HeaderMap, Json(v)
 
 async fn update_adapter(State(app): State<AppState>, headers: HeaderMap, Path(id): Path<String>, Json(v): Json<Value>) -> Res {
     admin_only(&headers)?;
-    if !adapters::custom_specs().iter().any(|s| s.id == id) { return Err(not_found("Custom adapter")); }
+    let previous = adapters::custom_specs().into_iter().find(|s| s.id == id).ok_or_else(|| not_found("Custom adapter"))?;
     let spec = parse_spec(v)?;
     if spec.id != id { return Err(bad("Adapter ID cannot be changed; create a new adapter.")); }
     if app.db.bots().iter().any(|b| b.harness == id && app.is_running(&b.id)) {
@@ -334,6 +334,15 @@ async fn update_adapter(State(app): State<AppState>, headers: HeaderMap, Path(id
     }
     app.db.save_adapter(&spec).map_err(|e| bad(e.to_string()))?;
     adapters::put_custom(spec.clone());
+    if previous.program != spec.program || previous.session != spec.session
+        || previous.args != spec.args || previous.output != spec.output
+        || previous.start_args != spec.start_args || previous.resume_args != spec.resume_args
+        || previous.stdin != spec.stdin {
+        for b in app.db.bots().iter().filter(|b| b.harness == id) {
+            app.db.update_bot(&b.id, BotPatch { session_id: Some(None), model: Some(None), effort: Some(None), ..Default::default() });
+            app.push_bot(&b.id);
+        }
+    }
     Ok(Json(json!(spec)))
 }
 
