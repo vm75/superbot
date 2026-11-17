@@ -11,7 +11,7 @@ pub struct Claude {
 }
 
 impl Adapter for Claude {
-    fn bin(&self) -> &'static str {
+    fn bin(&self) -> &str {
         "claude"
     }
 
