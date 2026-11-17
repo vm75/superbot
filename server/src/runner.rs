@@ -55,6 +55,10 @@ impl App {
         Arc::new(App { db, cfg, tx: broadcast::channel(1024).0, screens, bots: Mutex::default(), waiters: Mutex::default(), closing: AtomicBool::new(false) })
     }
 
+    pub fn default_harness(&self) -> String {
+        self.db.setting("default_harness").unwrap_or_else(|| self.cfg.default_harness.clone())
+    }
+
     pub fn is_running(&self, bot_id: &str) -> bool {
         self.state().get(bot_id).is_some_and(|s| s.run.is_some())
     }
@@ -197,6 +201,13 @@ impl App {
             {
                 env.extend(screen::bot_env(&info, &bot.id, &self.bot_dir(&bot.id)));
             }
+            let mut history: Vec<(String, String)> = self.db.messages(&bot.id, 100).into_iter()
+                .filter(|m| m.id < msg.id && !m.error && (m.role == "user" || m.role == "bot"))
+                .rev().take(20)
+                .map(|m| (if m.role == "bot" { "assistant".into() } else { "user".into() },
+                    m.text.chars().take(2000).collect()))
+                .collect();
+            history.reverse();
             let input = RunInput {
                 prompt: prompt.clone(),
                 system: self.system_prompt(&bot),
@@ -206,6 +217,7 @@ impl App {
                 effort: bot.effort.clone(),
                 env,
                 state_dir: self.bot_dir(&bot.id),
+                history,
             };
 
             let mut errors: Vec<String> = Vec::new();
