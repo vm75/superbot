@@ -8,7 +8,7 @@ use serde_json::Value;
 pub struct Codex;
 
 impl Adapter for Codex {
-    fn bin(&self) -> &'static str {
+    fn bin(&self) -> &str {
         "codex"
     }
 
